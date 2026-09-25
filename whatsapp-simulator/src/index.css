@@ -1,0 +1,8 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Opcional: cor de fundo da página inteira */
+body {
+  background-color: #d1d5db;
+}
