@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState,useRef, useEffect } from 'react';
 import { Send, User, Plus, Bot } from 'lucide-react';
 
 export default function App() {
@@ -16,6 +16,17 @@ export default function App() {
 
   const activeClient = clients.find(c => c.id === activeClientId);
   const activeMessages = activeClient && messages[activeClient.phone] ? messages[activeClient.phone] : [];
+
+
+  const messagesEndRef = useRef(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [activeMessages]);
 
   const handleSendMessage = async (e) => {
     e.preventDefault();
@@ -179,6 +190,7 @@ export default function App() {
                     </span>
                   </div>
                 ))}
+                <div ref={messagesEndRef} />
               </div>
               
               {/* Input */}
