@@ -1,5 +1,6 @@
 import os
 import asyncio
+import json
 from typing import List, Union, Optional, Dict
 from fastapi import APIRouter, Request, Response, Depends, BackgroundTasks
 from twilio.twiml.messaging_response import MessagingResponse
@@ -8,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from dotenv import load_dotenv
 from sqlalchemy.orm import selectinload
+from fastapi.responses import StreamingResponse
+
 
 # Imports do projeto
 from database import get_db, AsyncSessionLocal
@@ -24,10 +27,13 @@ TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
 TWILIO_NUMBER = os.environ.get("TWILIO_NUMBER")
 
+USE_SIMULATOR = os.getenv("USE_SIMULATOR", "false").lower() == "true"
+
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 # configurações do cache
 user_cache: Dict[str, ClientCache] = {}
+simulator_queues = []
 
 def add_to_history(cache: ClientCache, sender_type: str, content: str):
     """Adiciona uma mensagem estruturada ao histórico do cache do cliente."""
@@ -54,47 +60,90 @@ async def update_client_summary(cache: ClientCache, db: Optional[AsyncSession] =
                     db_user.user_context = resumo_geral
                     await session.commit()
 
-def answer_message(body: str, cache: Optional[ClientCache] = None) -> Response:
+async def answer_message(body: str, to_number: str, cache: Optional[ClientCache] = None) -> Response:
     """
-    Gera a resposta passiva (TwiML) para fechar a requisição HTTP atual.
-    Uso: Respostas imediatas e confirmações de recebimento.
+    Gera a resposta para fechar a requisição HTTP atual.
+    No simulador, envia via SSE e fecha a requisição. No Twilio, retorna TwiML.
     """
-    response = MessagingResponse()
-    twiml_msg = response.message()
-    twiml_msg.body(body)
-    
-    if cache is not None:
-        add_to_history(cache, "Bot", body)
-            
-    return Response(content=str(response), media_type="application/xml")
+    if USE_SIMULATOR:
+        # Reutilizamos a função unificada para jogar a mensagem no React via SSE
+        await send_message(to_number, body, cache)
+        
+        # O React não precisa ler isso, só precisamos fechar o ciclo HTTP com 200 OK
+        return Response(content="OK", status_code=200)
+        
+    else:
+        # Fluxo normal de produção para o Twilio
+        response = MessagingResponse()
+        twiml_msg = response.message()
+        twiml_msg.body(body)
+        
+        if cache is not None:
+            add_to_history(cache, "Bot", body)
+                
+        return Response(content=str(response), media_type="application/xml")
 
-
-def send_message(to_number: str, messages: Union[str, List[str]], cache: Optional[ClientCache] = None):
+async def send_message(to_number: str, messages: Union[str, List[str]], cache: Optional[ClientCache] = None):
     """
-    Envia uma ou mais mensagens ativamente via API REST do Twilio.
-    Uso: Background tasks, alertas, ou respostas processadas por IA após o TwiML.
+    Envia uma ou mais mensagens ativamente. 
+    Roteia para o Twilio (Produção) ou para as filas SSE (Simulador) baseado no .env.
     """
-    # Garante compatibilidade: se passar apenas uma string, converte para lista
     if isinstance(messages, str):
         messages = [messages]
 
     for body in messages:
-        # Pula mensagens vazias por segurança
         if not body.strip():
             continue
             
-        try:
-            twilio_client.messages.create(
-                from_=TWILIO_NUMBER,
-                body=body,
-                to=to_number
-            )
-            
+        if USE_SIMULATOR:
+            # Lógica do Simulador React
+            payload = {
+                "to": to_number,
+                "text": body,
+                "sender": "bot"
+            }
+            for queue in simulator_queues:
+                await queue.put(payload)
+                
             if cache is not None:
                 add_to_history(cache, "Bot", body)
-                    
-        except Exception as e:
-            print(f"Erro ao enviar mensagem via REST para {to_number}: {e}")
+            print(f"[SIMULADOR] Mensagem enviada para {to_number}: {body}")
+            
+        else:
+            # Lógica do Twilio REST API
+            try:
+                twilio_client.messages.create(
+                    from_=TWILIO_NUMBER,
+                    body=body,
+                    to=to_number
+                )
+                if cache is not None:
+                    add_to_history(cache, "Bot", body)
+            except Exception as e:
+                print(f"[TWILIO] Erro ao enviar mensagem para {to_number}: {e}")
+
+@router.get("/simulator/stream")
+async def simulator_stream(request: Request):
+    """Rota que o React escuta em background para receber mensagens do backend."""
+    queue = asyncio.Queue()
+    simulator_queues.append(queue)
+    
+    async def event_generator():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                message = await asyncio.wait_for(queue.get(), timeout=1.0)
+                yield f"data: {json.dumps(message)}\n\n"
+        except asyncio.TimeoutError:
+            pass
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if queue in simulator_queues:
+                simulator_queues.remove(queue)
+                
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @router.post("") # /whatsapp
 async def whatsapp_bot(
