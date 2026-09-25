@@ -16,7 +16,7 @@ from fastapi.responses import StreamingResponse
 from database import get_db, AsyncSessionLocal
 from models import User as DBUser
 from models import Company
-from agents import get_message_context, extract_product_tags, recommend_products, summary_messages,confirm_purchase,generate_proactive_greeting, resolve_client_problem, extract_feedback_metrics
+from agents import get_message_context, summary_messages
 from schemas import ClientCache, ChatMessage
 
 router = APIRouter()
@@ -60,30 +60,21 @@ async def update_client_summary(cache: ClientCache, db: Optional[AsyncSession] =
                     db_user.user_context = resumo_geral
                     await session.commit()
 
-async def answer_message(body: str, to_number: str, cache: Optional[ClientCache] = None) -> Response:
+def answer_message(body: str, cache: Optional[ClientCache] = None) -> Response:
     """
-    Gera a resposta para fechar a requisição HTTP atual.
-    No simulador, envia via SSE e fecha a requisição. No Twilio, retorna TwiML.
+    Gera a resposta passiva (TwiML) para fechar a requisição HTTP atual.
+    Uso: Respostas imediatas e confirmações de recebimento.
     """
-    if USE_SIMULATOR:
-        # Reutilizamos a função unificada para jogar a mensagem no React via SSE
-        await send_message(to_number, body, cache)
-        
-        # O React não precisa ler isso, só precisamos fechar o ciclo HTTP com 200 OK
-        return Response(content="OK", status_code=200)
-        
-    else:
-        # Fluxo normal de produção para o Twilio
-        response = MessagingResponse()
-        twiml_msg = response.message()
-        twiml_msg.body(body)
-        
-        if cache is not None:
-            add_to_history(cache, "Bot", body)
-                
-        return Response(content=str(response), media_type="application/xml")
+    response = MessagingResponse()
+    twiml_msg = response.message()
+    twiml_msg.body(body)
+    
+    if cache is not None:
+        add_to_history(cache, "Bot", body)
+            
+    return Response(content=str(response), media_type="application/xml")
 
-async def send_message(to_number: str, messages: Union[str, List[str]], cache: Optional[ClientCache] = None):
+def send_message(to_number: str, messages: Union[str, List[str]], cache: Optional[ClientCache] = None):
     """
     Envia uma ou mais mensagens ativamente. 
     Roteia para o Twilio (Produção) ou para as filas SSE (Simulador) baseado no .env.
@@ -103,7 +94,7 @@ async def send_message(to_number: str, messages: Union[str, List[str]], cache: O
                 "sender": "bot"
             }
             for queue in simulator_queues:
-                await queue.put(payload)
+                queue.put(payload)
                 
             if cache is not None:
                 add_to_history(cache, "Bot", body)
