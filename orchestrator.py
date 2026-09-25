@@ -6,6 +6,18 @@ from agents import get_message_context, extract_products_from_message, text_embe
 import asyncio
 import numpy as np
 
+from qdrant_client import QdrantClient
+from qdrant_client.models import VectorParams, Distance
+
+qdrant = QdrantClient("localhost", port=6333)
+
+# Cria a collection se não existir, otimizada para a OpenAI text-embedding-3-small
+if not qdrant.collection_exists("produtos"):
+    qdrant.create_collection(
+        collection_name="produtos",
+        vectors_config=VectorParams(size=768, distance=Distance.COSINE),
+    )
+
 async def manage_agent(sender_num: str, original_message: str, intention: str, cache: ClientCache):
     
     from whatsapp import send_message, update_client_summary
@@ -102,19 +114,42 @@ async def manage_agent(sender_num: str, original_message: str, intention: str, c
                     reply = "⚠️ Nenhuma empresa encontrada no seu cadastro. Registre a empresa antes de gerenciar produtos."
                 else:
                     if operacao == "adicionar":
+                        from qdrant_client.models import PointStruct
                         for prod_name in products_in_memory:
-                            embedding_vector = await asyncio.to_thread(text_embedding, prod_name)
+                            # 1. Instancia o produto apenas com os metadados textuais
                             new_product = Product(
                                 company_id=company.company_id,
                                 user_id=cache.id,
-                                product_name=prod_name,
-                                product_embedding=embedding_vector  # Passando a lista limpa da OpenAI
+                                product_name=prod_name
                             )
                             db.add(new_product)
+                            
+                            # 2. O flush força o Postgres a gerar o product_id sem finalizar a transação
+                            await db.flush() 
+                            
+                            print(f"[DEBUG] Postgres gerou o ID: {new_product.product_id}. Gerando vetor...")
+                            
+                            # 3. Gera a lista de floats pela API da OpenAI
+                            embedding_list = await asyncio.to_thread(text_embedding, prod_name)
+                            
+                            # 4. Salva no Qdrant, usando o product_id como chave de amarração (Point ID)
+                            # O payload permite salvar filtros úteis para não precisar consultar o Postgres a todo momento
+                            qdrant.upsert(
+                                collection_name="produtos",
+                                points=[
+                                    PointStruct(
+                                        id=new_product.product_id, 
+                                        vector=embedding_list,
+                                        payload={
+                                            "company_id": company.company_id, 
+                                            "product_name": prod_name
+                                        }
+                                    )
+                                ]
+                            )
 
-                        print("[DEBUG] Fazendo commit no banco de dados...")
+                        # 5. Se o Qdrant não deu erro, finaliza a transação do Postgres
                         await db.commit()
-                        print("[DEBUG] Commit realizado com sucesso!")
                         reply = f"✅ Sucesso! {len(products_in_memory)} produto(s) adicionado(s) ao seu catálogo."
                     
                     elif operacao == "alterar":
