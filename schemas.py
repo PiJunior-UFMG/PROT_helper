@@ -12,6 +12,7 @@ class ClientCache(BaseModel):
     num: str
     messages: List[ChatMessage] = []
     step: str = "start"
+    pending_operation: Optional[str] = None
     suggested_products: List[dict] = []
 
 class ProductRecommendation(BaseModel):

@@ -65,11 +65,11 @@ class Company(Base):
 class Product(Base):
     __tablename__ = "Product"
 
-    product_id: Mapped[int] = mapped_column(primary_key=True)
-    company_id: Mapped[int] = mapped_column(ForeignKey("Company.company_id"), autoincrement=True)
+    product_id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("Company.company_id"))
     user_id: Mapped[int] = mapped_column(Integer)
     product_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    product_embedding: Mapped[Optional[list]] = mapped_column(Vector(1536), nullable=True)
+    product_embedding: Mapped[Optional[list]] = mapped_column(Vector(768), nullable=True)
 
     # Relacionamentos
     company: Mapped["Company"] = relationship(back_populates="products")
@@ -85,7 +85,7 @@ class Demand(Base):
     item: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[int] = mapped_column(Integer)
     fail_reason: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    item_embedding: Mapped[Optional[list]] = mapped_column(Vector(1536), nullable=True)
+    item_embedding: Mapped[Optional[list]] = mapped_column(Vector(768), nullable=True)
 
     # Relacionamentos
     user: Mapped["User"] = relationship(back_populates="demands")

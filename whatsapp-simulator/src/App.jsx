@@ -1,22 +1,45 @@
-import React, { useState,useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Send, User, Plus, Bot } from 'lucide-react';
 
 export default function App() {
   const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000/whatsapp';
 
-  const [clients, setClients] = useState([
-    { id: '1', name: 'Cliente A', phone: 'whatsapp:+5531999990001' },
-    { id: '2', name: 'Cliente B', phone: 'whatsapp:+5531999990002' },
-  ]);
+  const [clients, setClients] = useState(() => {
+    const saved = localStorage.getItem('simulator_clients');
+    if (saved) {
+      try { return JSON.parse(saved); } catch (e) { /* fallback */ }
+    }
+    return [
+      { id: '1', name: 'Cliente A', phone: 'whatsapp:+5531999990001' },
+      { id: '2', name: 'Cliente B', phone: 'whatsapp:+5531999990002' },
+    ];
+  });
 
-  const [messages, setMessages] = useState({});
+  const [messages, setMessages] = useState(() => {
+    const saved = localStorage.getItem('simulator_messages');
+    if (saved) {
+      try { return JSON.parse(saved); } catch (e) { /* fallback */ }
+    }
+    return {};
+  });
+
   const [activeClientId, setActiveClientId] = useState(null);
   const [inputText, setInputText] = useState('');
   const [newClientPhone, setNewClientPhone] = useState('');
 
+  // DECLARAÇÃO MOVIDA PARA O TOPO (Resolve o erro "activeMessages is not defined")
   const activeClient = clients.find(c => c.id === activeClientId);
   const activeMessages = activeClient && messages[activeClient.phone] ? messages[activeClient.phone] : [];
 
+  // Grava no localStorage sempre que 'clients' mudar
+  useEffect(() => {
+    localStorage.setItem('simulator_clients', JSON.stringify(clients));
+  }, [clients]);
+
+  // Grava no localStorage sempre que 'messages' mudar
+  useEffect(() => {
+    localStorage.setItem('simulator_messages', JSON.stringify(messages));
+  }, [messages]);
 
   const messagesEndRef = useRef(null);
 
@@ -39,7 +62,6 @@ export default function App() {
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     };
 
-    // Atualiza a tela com a mensagem enviada
     setMessages(prev => ({
       ...prev,
       [activeClient.phone]: [...(prev[activeClient.phone] || []), userMessage]
@@ -47,11 +69,9 @@ export default function App() {
     
     setInputText('');
 
-    // 1. Emula perfeitamente o payload do Twilio (Form Data)
     const formData = new URLSearchParams();
     formData.append('From', activeClient.phone);
     formData.append('Body', userMessage.text);
-    // Você pode adicionar ProfileName, WaId, etc., se sua API usar no futuro
 
     try {
       const response = await fetch(apiUrl, {
@@ -62,16 +82,13 @@ export default function App() {
         body: formData.toString()
       });
 
-      // 2. Recebe e faz o parse do XML (TwiML)
       const xmlText = await response.text();
       const parser = new DOMParser();
       const xmlDoc = parser.parseFromString(xmlText, "text/xml");
       
-      // Busca todas as tags <Body> dentro do XML de resposta
       const bodyNodes = xmlDoc.getElementsByTagName("Body");
       
       if (bodyNodes.length > 0) {
-        // O Twilio pode enviar múltiplas mensagens de uma vez usando vários <Message><Body>
         const newBotMessages = Array.from(bodyNodes).map((node, index) => ({
           id: Date.now().toString() + index,
           text: node.textContent,
@@ -93,7 +110,6 @@ export default function App() {
     e.preventDefault();
     if (!newClientPhone.trim()) return;
     
-    // O Twilio costuma enviar os números do WhatsApp com este prefixo
     const phoneFormatted = newClientPhone.startsWith('whatsapp:') 
       ? newClientPhone 
       : `whatsapp:${newClientPhone}`;
@@ -107,6 +123,35 @@ export default function App() {
     setClients([...clients, newClient]);
     setNewClientPhone('');
   };
+
+  useEffect(() => {
+    const streamUrl = apiUrl.replace('/whatsapp', '/whatsapp/simulator/stream');
+    const eventSource = new EventSource(streamUrl);
+
+    eventSource.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        
+        const newBotMessage = {
+          id: Date.now().toString() + Math.random(),
+          text: data.text,
+          sender: 'bot',
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        };
+
+        setMessages(prev => ({
+          ...prev,
+          [data.to]: [...(prev[data.to] || []), newBotMessage]
+        }));
+      } catch (err) {
+        console.error("Erro ao processar evento do stream:", err);
+      }
+    };
+
+    return () => {
+      eventSource.close();
+    };
+  }, [apiUrl]);
 
   return (
     <div className="h-screen w-full flex items-center justify-center p-4">

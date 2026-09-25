@@ -20,27 +20,41 @@ client = OpenAI(
 )
 
 
-def text_embedding_local(text: str) -> list[float]:
-    """Gera um vetor de 768 dimensões rodando 100% localmente."""
-    model = SentenceTransformer("intfloat/multilingual-e5-base",device="cpu")
+openai_client = OpenAI(
+    api_key=os.environ.get("OPENAI_API_KEY")
+)
 
-    # Para o modelo E5, recomenda-se prefixar o texto (ex: 'query: ' ou 'passage: ') para melhores resultados
-    text = f"passage: {text}"
+def text_embedding(text: str) -> list[float]:
+    """Gera um vetor de 768 dimensões utilizando a API da OpenAI."""
+    # Opcional: manter o prefixo se quiser alinhar com o padrão de busca, 
+    # embora a OpenAI lidere bem com frases diretas.
     
-    vector = model.encode(text)
-    return vector.tolist()
+    response = openai_client.embeddings.create(
+        input=[text],
+        model="text-embedding-3-small",
+        dimensions=768  # ESSENCIAL: Mantém compatibilidade exata com colunas de 768 dimensões no pgvector
+    )
+    
+    return response.data[0].embedding
 
 
-def get_message_context(mensagem: str, prompt_filename: str, valid_categories: list) -> str: # alterar
+import os
+
+def get_message_context(mensagem: str, prompt_filename: str, valid_categories: list, client_summary: str = "") -> str:
     """
-    Analisa a intenção da mensagem usando um prompt específico passado por parâmetro 
-    e valida o resultado contra as categorias permitidas.
+    Analisa a intenção da mensagem usando um prompt específico passado por parâmetro,
+    considerando o histórico da conversa, e valida o resultado contra as categorias permitidas.
     """
+    summary_text = client_summary if client_summary else "Sem histórico recente."
+    
     prompt_path = os.path.join(os.path.dirname(__file__), "prompts", prompt_filename)
     with open(prompt_path, "r", encoding="utf-8") as f:
         template = f.read()
         
-    formatted_prompt = template.replace("{mensagem}", mensagem)
+    formatted_prompt = (
+        template.replace("{mensagem}", mensagem)
+        .replace("{client_summary}", summary_text)
+    )
     
     try:
         response = client.chat.completions.create(
@@ -67,53 +81,58 @@ def get_message_context(mensagem: str, prompt_filename: str, valid_categories: l
         print(f"Erro ao consultar o DeepSeek para triagem contextual ({prompt_filename}): {e}")
         return valid_categories[0]
 
-def extract_product_tags(client_message: str, catalog_data: str, client_summary: str = "") -> list: # alterar
+def extract_products_from_message(client_message: str, client_summary: str = "") -> list:
     """
-    Agente responsável por extrair as tags relevantes com base no pedido do cliente 
-    e nos dados atuais do catálogo da distribuidora.
+    Agente responsável por extrair os nomes dos produtos a partir da mensagem do cliente.
+    Retorna uma lista de strings. Ex: ["tomate", "maçã", "caixa de banana"]
     """
-    # Se o resumo for vazio, garante que a IA não se confunda
     summary_text = client_summary if client_summary else "Sem histórico recente."
 
-    prompt_tags_path = os.path.join(os.path.dirname(__file__), "prompts", "extract_tags.txt")
-    with open(prompt_tags_path, "r", encoding="utf-8") as f:
-        PROMPT_TAGS_TEMPLATE = f.read()
+    prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "extract_products.txt")    
+    with open(prompt_path, "r", encoding="utf-8") as f:
+        template = f.read()
 
     formatted_prompt = (
-        PROMPT_TAGS_TEMPLATE
-        .replace("{catalog_data}", catalog_data)
+        template
         .replace("{client_message}", client_message)
-        .replace("{client_summary}", summary_text)
+        #.replace("{client_summary}", summary_text) avaliar a necessidade de um resumo para isso
     )
     
     try:
         response = client.chat.completions.create(
             model="deepseek-chat",
             messages=[
-                {"role": "system", "content": "Você é um extrator de tags estruturadas em JSON."},
+                {"role": "system", "content": "Você é um extrator de nomes de produtos estritamente estruturados em uma lista JSON."},
                 {"role": "user", "content": formatted_prompt}
             ],
             temperature=0.0,
-            max_tokens=150
+            max_tokens=200
         )
         
         content = response.choices[0].message.content.strip()
 
         if response.usage:
             log_agent_usage(
-                agent_name="extract_product_tags", 
+                agent_name="extract_products_from_message", 
                 prompt_tokens=response.usage.prompt_tokens, 
                 completion_tokens=response.usage.completion_tokens
             )
-        # Converte a resposta texto em uma lista Python válida
-        tags_list = json.loads(content)
-        if isinstance(tags_list, list):
-            return tags_list
+                
+        # Limpeza defensiva caso a IA retorne formatação markdown (ex: ```json [...] ```)
+        if content.startswith("```"):
+            content = content.strip("`").replace("json", "", 1).strip()
+            
+        products_list = json.loads(content)
+        
+        if isinstance(products_list, list):
+            return products_list
         return []
         
     except Exception as e:
-        print(f"Erro ao extrair tags com o DeepSeek: {e}")
+        print(f"Erro ao extrair produtos com o DeepSeek: {e}")
         return []
+
+    
 async def summary_messages(client_messages: list, target_step: Optional[str] = None) -> str:
     """
     Resgata o histórico de mensagens e faz um resumo objetivo.

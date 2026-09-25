@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import whatsapp
 from database import create_tables
 
-app = FastAPI(reload=True)
+app = FastAPI()
 
 # configurando cors
 app.add_middleware(

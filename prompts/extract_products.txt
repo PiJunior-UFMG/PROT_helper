@@ -1,0 +1,16 @@
+Identifique e extraia todos os nomes de produtos que o cliente deseja cadastrar, alterar ou remover mencionados na mensagem abaixo.
+Use o histórico para obter contexto, caso a mensagem faça referência a algo dito anteriormente.
+
+Histórico do Cliente:
+{client_summary}
+
+Mensagem do Cliente:
+{client_message}
+
+Regras:
+1. Retorne APENAS uma lista JSON válida contendo os nomes dos produtos como strings.
+2. Não inclua Markdown, explicações ou texto adicional.
+3. Se nenhum produto for identificado, retorne uma lista vazia: []
+
+Exemplo de saída esperada:
+["tomate 1kg", "caixa de morango", "abacaxi"]

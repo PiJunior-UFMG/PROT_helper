@@ -11,13 +11,13 @@ from dotenv import load_dotenv
 from sqlalchemy.orm import selectinload
 from fastapi.responses import StreamingResponse
 
-
 # Imports do projeto
 from database import get_db, AsyncSessionLocal
 from models import User as DBUser
 from models import Company
 from agents import get_message_context, summary_messages
 from schemas import ClientCache, ChatMessage
+from orchestrator import manage_agent
 
 router = APIRouter()
 
@@ -87,19 +87,16 @@ def send_message(to_number: str, messages: Union[str, List[str]], cache: Optiona
             continue
             
         if USE_SIMULATOR:
-            # Lógica do Simulador React
             payload = {
                 "to": to_number,
                 "text": body,
                 "sender": "bot"
-            }
+            }            
             for queue in simulator_queues:
-                queue.put(payload)
+                queue.put_nowait(payload)
                 
             if cache is not None:
                 add_to_history(cache, "Bot", body)
-            print(f"[SIMULADOR] Mensagem enviada para {to_number}: {body}")
-            
         else:
             # Lógica do Twilio REST API
             try:
@@ -139,7 +136,7 @@ async def simulator_stream(request: Request):
 @router.post("") # /whatsapp
 async def whatsapp_bot(
     request: Request, 
-    background_tasks: BackgroundTasks, 
+    background_tasks: BackgroundTasks, # Injeção de dependência para tarefas em background
     db: AsyncSession = Depends(get_db)
 ):
     form_data = await request.form()
@@ -177,7 +174,6 @@ async def whatsapp_bot(
         return answer_message(f"🔄 old_step: {old_step}, new_step: {new_step}", cache)
     
     # --- LÓGICA DE ESTADOS / AUTENTICAÇÃO ---
-    
     if not cache:
         stmt = select(DBUser).where(DBUser.user_phone == sender)
         result = await db.execute(stmt)
@@ -198,7 +194,8 @@ async def whatsapp_bot(
             return answer_message("Olá! Seja bem-vindo. Para começarmos o seu cadastro, qual é o seu nome?", cache)
             
     add_to_history(cache, "User", original_message)
-        
+
+    # --- ROTEAMENTO DO FLUXO ---
     if cache.step == 'awaiting_user_register':
         user_name = original_message.title()
         
@@ -209,42 +206,9 @@ async def whatsapp_bot(
         
         cache.id = new_user.id
         cache.name = user_name
-        # Muda o estado para aguardar a escolha do usuário
-        cache.step = 'awaiting_user_choice'
+        cache.step = 'finished'
         
-        reply = (
-            f"Prazer, {cache.name}! Cadastro de usuário realizado. ✅\n"
-            f"*(Lembrando que você pode inserir mais informações no seu perfil posteriormente, nada é obrigatório agora).*\n\n"
-            f"Para direcionar nosso atendimento, o que você gostaria de fazer?\n"
-            f"🛒 *Comprar* produtos\n"
-            f"🏢 Cadastrar sua empresa para *vender* produtos"
-        )
-        return answer_message(reply, cache)
-
-    elif cache.step == 'awaiting_user_choice':
-        msg_lower = original_message.lower()
-        
-        # Usa o histórico/mensagem para inferir a intenção. 
-        # Aqui fazemos uma validação rápida por palavras-chave, 
-        # mas você também pode usar sua função get_message_context da IA.
-        if any(word in msg_lower for word in ["vender", "empresa", "cadastrar", "loja"]):
-            intention = "vender"
-        elif any(word in msg_lower for word in ["comprar", "adquirir", "buscar", "procurar"]):
-            intention = "comprar"
-        else:
-            # Fallback para o classificador de IA caso a resposta seja muito solta
-            intention = get_message_context(
-                original_message, 
-                "message_context_choice.txt", 
-                ["vender", "comprar", "outro"]
-            )
-            
-        if intention == "vender":
-            cache.step = 'awaiting_company_register'
-            return answer_message("Excelente! Para começar a vender, por favor, informe o **nome da sua empresa**:", cache)
-        else:
-            cache.step = 'buy_products'
-            return answer_message("Perfeito! Vamos às compras 🛒. O que você está buscando hoje?", cache)
+        return answer_message(f"Prazer, {cache.name}! Seu cadastro foi feito. ✅\nComo posso ajudar hoje? (Diga se deseja comprar ou vender)", cache)
 
     elif cache.step == 'awaiting_company_register':
         company_name = original_message.strip()
@@ -258,21 +222,52 @@ async def whatsapp_bot(
         
         reply = (
             f"Empresa '{company_name}' cadastrada com sucesso! 🏢\n\n"
-            f"Agora já podemos cadastrar o que você vai oferecer. Me descreva o primeiro **produto** que deseja registrar:"
+            f"Agora já podemos cadastrar o que você vai oferecer. Me descreva os produto que deseja registrar"
         )
         return answer_message(reply, cache)
+    
+    elif cache.step == 'awaiting_product_confirmation':
+        msg_lower = original_message.lower()
+        
+        # Se o cliente confirmar (sim, pode, ok, confirmo)
+        if any(word in msg_lower for word in ["sim", "pode", "confirmo", "isso", "ok", "certo"]):
+            
+            # Verifica qual operação estava guardada no cache
+            operacao = getattr(cache, 'pending_operation', 'adicionar')
+            
+            if operacao == "adicionar":
+                holding_msg = "⏳ Salvando seus produtos e gerando a busca inteligente. Isso pode levar alguns segundos..."
+            elif operacao == "alterar":
+                holding_msg = "⏳ Atualizando as informações dos seus produtos no sistema..."
+            elif operacao == "remover":
+                holding_msg = "⏳ Removendo os produtos selecionados do seu catálogo..."
+            else:
+                holding_msg = "⏳ Processando as alterações no seu catálogo..."
+            
+            # Manda para a fila do BackgroundTask com uma intenção genérica de execução
+            background_tasks.add_task(manage_agent, sender, original_message, "executar_operacao_confirmada", cache)
+            return answer_message(holding_msg, cache)
+            
+        # Se ele negar ou cancelar
+        else:
+            cache.step = "finished"
+            if cache:
+                cache.suggested_products = [] # Limpa a memória
+                cache.pending_operation = None
+            await update_client_summary(cache, db)
+            return answer_message("❌ Operação no catálogo cancelada. O que você gostaria de fazer agora?", cache)
 
     elif cache.step == 'product_register':
-        # Exemplo simplificado para o fluxo de registro de produtos
-        cache.step = 'finished'
-        await update_client_summary(cache, db)
-        return answer_message("📦 Produto registrado com sucesso! Mais alguma coisa em que posso ajudar?", cache)
+        # O cliente está respondendo com os dados do produto. Enviamos para o agente classificar e processar.
+        holding_msg = "⏳ Entendido! Estou analisando e processando as informações dos produtos..."
+        background_tasks.add_task(manage_agent, sender, original_message, "venda", cache)
+        return answer_message(holding_msg, cache)
 
     elif cache.step == 'buy_products':
-        # Exemplo simplificado para o fluxo de compra de produtos
-        cache.step = 'finished'
-        await update_client_summary(cache, db)
-        return answer_message("🛒 Processo de compra atualizado. Como deseja prosseguir?", cache)
+        # O cliente está num fluxo direto de compra. Aciona o agente com intenção de "compra".
+        holding_msg = "⏳ Buscando as melhores opções para o seu pedido..."
+        background_tasks.add_task(manage_agent, sender, original_message, "compra", cache)
+        return answer_message(holding_msg, cache)
     
     # --- ESTADO NORMAL / FINALIZADO ---
     elif cache.step == 'finished':
@@ -280,23 +275,45 @@ async def whatsapp_bot(
         intention = get_message_context(
             original_message, 
             "message_context.txt", 
-            ["saudacao", "produto", "compra", "verificacao"]
+            ["saudacao", "compra", "venda"]
         )
         
-        if intention == "produto":
-            cache.step = "product_register"
-            reply = "Entendido, vamos iniciar o registro de novos produtos. Me informe os detalhes do item:"
+        if intention == "venda":
+            stmt = (
+                select(DBUser)
+                .options(selectinload(DBUser.companies))
+                .where(DBUser.user_phone == sender)
+            )
+            result = await db.execute(stmt)
+            existing_user = result.scalars().first()
+
+            # Verifica se o usuário existe e se possui empresas cadastradas
+            if not existing_user or not existing_user.companies:
+                cache.step = "awaiting_company_register"  
+                reply = "Entendido, primeiro vamos iniciar o registro de sua empresa. Por favor, envie o nome da empresa:"
+                return answer_message(reply, cache)
+            else:
+                # FIM DA GAMBIARRA: Apenas muda o step e pergunta o que ele quer fazer
+                cache.step = "product_register"
+                reply = "Entendido! Vamos gerenciar seu catálogo. Me descreva os produtos que você deseja adicionar, alterar ou remover:"
+                await update_client_summary(cache, db)
+                return answer_message(reply, cache)
+        
         elif intention == "compra":
-            cache.step = "buy_products"
-            reply = "Certo, vamos selecionar os produtos para compra. O que você procura?"
+            holding_msg = "⏳ Entendido! Vou analisar seu pedido de compra no banco de dados, só um instante..."
+            background_tasks.add_task(manage_agent, sender, original_message, "compra",cache)
+            return answer_message(holding_msg, cache)
+        
         elif intention == "saudacao":
-            reply = f"Olá, {cache.name or 'novamente'}! Como posso ajudar você hoje?"
-        elif intention == "verificacao":
-            reply = "Verifiquei e não encontrei registros recentes por aqui."
+            reply = f"👋 Olá, {cache.name or 'tudo bem'}! Como posso ajudar hoje?"
+            
+            # Atualiza o histórico da conversa e devolve a resposta final
+            await update_client_summary(cache, db)
+            return answer_message(reply, cache)
+            
         else:
             reply = "Desculpe, não compreendi muito bem. Poderia reformular?"
-
-        await update_client_summary(cache, db)
-        return answer_message(reply, cache)   
+            await update_client_summary(cache, db)
+            return answer_message(reply, cache)   
     
     return answer_message("Desculpe, ocorreu um erro de contexto.", cache)
