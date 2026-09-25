@@ -3,14 +3,12 @@ import uvicorn
 import argparse
 import asyncio
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware # 1. IMPORTANTE: Adicionado para o React
-
+from fastapi.middleware.cors import CORSMiddleware
 #import dashboard
 import whatsapp
 from database import create_tables
 
-app = FastAPI()
+app = FastAPI(reload=True)
 
 # configurando cors
 app.add_middleware(
@@ -21,16 +19,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
 app.include_router(whatsapp.router, prefix="/whatsapp", tags=["WhatsApp Bot"])
-
-
-# 3. ATENÇÃO: IMPORTAÇÃO CIRCULAR
-# Se o arquivo whatsapp.py tentar fazer `from main import simulator_queues`, o Python vai dar erro
-# pois o main.py já importa o whatsapp.py ali em cima. 
-# RECOMENDAÇÃO: Mova esta lista e a rota '/simulator/stream' para DENTRO do seu arquivo `whatsapp.py` 
-# e troque `@app.get` por `@router.get`. (Não se esqueça de atualizar a URL no frontend para /whatsapp/simulator/stream).
-
 
 async def initialize_db(create_db: bool):
     if create_db:

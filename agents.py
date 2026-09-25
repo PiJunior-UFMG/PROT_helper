@@ -7,8 +7,8 @@ from sqlalchemy.orm import selectinload
 from typing import Optional
 from sentence_transformers import SentenceTransformer
 
-from models import Supplier, Product
-from schemas import ProductRecommendation, ProductRecommendationList, FeedbackResult
+#from models import Supplier, Product
+#from schemas import ProductRecommendation, ProductRecommendationList, FeedbackResult
 from logger import log_agent_usage
 
 load_dotenv()
@@ -114,101 +114,6 @@ def extract_product_tags(client_message: str, catalog_data: str, client_summary:
     except Exception as e:
         print(f"Erro ao extrair tags com o DeepSeek: {e}")
         return []
-
-async def recommend_products( # alterar
-    client_message: str, 
-    tags: list, 
-    db_session, 
-    previously_suggested: list = None,
-    client_summary: str = ""
-) -> list:
-    """
-    Faz a busca no banco usando as tags e aciona a IA para ranquear os produtos,
-    levando em consideração o histórico do cliente e o que já foi oferecido na sessão.
-    """
-
-    if tags:
-        stmt = (
-            select(Product)
-            .join(Supplier)
-            .options(selectinload(Product.supplier))
-            .where(
-                or_(*[Product.prod_tag.ilike(f"%{tag}%") for tag in tags] + 
-                    [Supplier.sup_category.ilike(f"%{tag}%") for tag in tags])
-            )
-        )
-    else:
-        # Se a mensagem foi ampla (ex: "me recomende algo"), trazemos um lote geral
-        # e deixamos a IA escolher as melhores opções baseada no client_summary!
-        stmt = (
-            select(Product)
-            .join(Supplier)
-            .options(selectinload(Product.supplier))
-            .limit(40) # Ajuste o limite conforme o tamanho real do seu catálogo
-        )
-
-    result = await db_session.execute(stmt)
-    products = result.scalars().all()
-
-    if not products:
-        return []
-
-    products_data = []
-    for p in products:
-        products_data.append({
-            "id": p.prod_id,
-            "name": p.prod_name,
-            "price": p.prod_price,
-            "supplier": p.supplier.sup_name if p.supplier else "Desconhecido",
-            "category": p.supplier.sup_category if p.supplier else "",
-            "tag": p.prod_tag
-        })
-
-    # Tratamento dos contextos opcionais para evitar variáveis nulas no prompt
-    prev_sug_str = json.dumps(previously_suggested, ensure_ascii=False) if previously_suggested else "[]"
-    summary_str = client_summary if client_summary else "Cliente sem histórico registrado."
-
-    prompt_tags_path = os.path.join(os.path.dirname(__file__), "prompts", "recommend_products.txt")
-    with open(prompt_tags_path, "r", encoding="utf-8") as f:
-        PROMPT_RECOMMEND_TEMPLATE = f.read()
-
-    formatted_prompt = (
-        PROMPT_RECOMMEND_TEMPLATE
-        .replace("{client_message}", client_message)
-        .replace("{extracted_tags}", str(tags))
-        .replace("{client_summary}", summary_str)
-        .replace("{previously_suggested}", prev_sug_str)
-        .replace("{products_from_db}", json.dumps(products_data, ensure_ascii=False))
-    )
-
-    try:
-        response = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": "Você é um recomendador de produtos inteligente que responde em JSON estruturado."},
-                {"role": "user", "content": formatted_prompt}
-            ],
-            temperature=0.2, # Ligeiramente maior que 0 para permitir certa criatividade nas alternativas
-            response_format={"type": "json_object"} 
-        )
-
-        if response.usage:
-            log_agent_usage(
-                agent_name="recommend_products", 
-                prompt_tokens=response.usage.prompt_tokens, 
-                completion_tokens=response.usage.completion_tokens
-            )
-
-        content = response.choices[0].message.content
-        data = json.loads(content)
-        validated_data = ProductRecommendationList(**data)
-        
-        return validated_data.recommendations[:10]
-        
-    except Exception as e:
-        print(f"Erro ao recomendar produtos com IA: {e}")
-        return []
-    
 async def summary_messages(client_messages: list, target_step: Optional[str] = None) -> str:
     """
     Resgata o histórico de mensagens e faz um resumo objetivo.
@@ -341,3 +246,97 @@ async def generate_proactive_greeting(client_message: str, client_name: str, cli
     except Exception as e:
         print(f"Erro ao gerar saudação proativa com IA: {e}")
         return f"Olá, {client_name}! Como posso ajudar você hoje?"
+
+"""
+async def recommend_products( # alterar
+    client_message: str, 
+    tags: list, 
+    db_session, 
+    previously_suggested: list = None,
+    client_summary: str = ""
+) -> list:
+    Faz a busca no banco usando as tags e aciona a IA para ranquear os produtos,
+    levando em consideração o histórico do cliente e o que já foi oferecido na sessão.
+
+    if tags:
+        stmt = (
+            select(Product)
+            .join(Supplier)
+            .options(selectinload(Product.supplier))
+            .where(
+                or_(*[Product.prod_tag.ilike(f"%{tag}%") for tag in tags] + 
+                    [Supplier.sup_category.ilike(f"%{tag}%") for tag in tags])
+            )
+        )
+    else:
+        # Se a mensagem foi ampla (ex: "me recomende algo"), trazemos um lote geral
+        # e deixamos a IA escolher as melhores opções baseada no client_summary!
+        stmt = (
+            select(Product)
+            .join(Supplier)
+            .options(selectinload(Product.supplier))
+            .limit(40) # Ajuste o limite conforme o tamanho real do seu catálogo
+        )
+
+    result = await db_session.execute(stmt)
+    products = result.scalars().all()
+
+    if not products:
+        return []
+
+    products_data = []
+    for p in products:
+        products_data.append({
+            "id": p.prod_id,
+            "name": p.prod_name,
+            "price": p.prod_price,
+            "supplier": p.supplier.sup_name if p.supplier else "Desconhecido",
+            "category": p.supplier.sup_category if p.supplier else "",
+            "tag": p.prod_tag
+        })
+
+    # Tratamento dos contextos opcionais para evitar variáveis nulas no prompt
+    prev_sug_str = json.dumps(previously_suggested, ensure_ascii=False) if previously_suggested else "[]"
+    summary_str = client_summary if client_summary else "Cliente sem histórico registrado."
+
+    prompt_tags_path = os.path.join(os.path.dirname(__file__), "prompts", "recommend_products.txt")
+    with open(prompt_tags_path, "r", encoding="utf-8") as f:
+        PROMPT_RECOMMEND_TEMPLATE = f.read()
+
+    formatted_prompt = (
+        PROMPT_RECOMMEND_TEMPLATE
+        .replace("{client_message}", client_message)
+        .replace("{extracted_tags}", str(tags))
+        .replace("{client_summary}", summary_str)
+        .replace("{previously_suggested}", prev_sug_str)
+        .replace("{products_from_db}", json.dumps(products_data, ensure_ascii=False))
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": "Você é um recomendador de produtos inteligente que responde em JSON estruturado."},
+                {"role": "user", "content": formatted_prompt}
+            ],
+            temperature=0.2, # Ligeiramente maior que 0 para permitir certa criatividade nas alternativas
+            response_format={"type": "json_object"} 
+        )
+
+        if response.usage:
+            log_agent_usage(
+                agent_name="recommend_products", 
+                prompt_tokens=response.usage.prompt_tokens, 
+                completion_tokens=response.usage.completion_tokens
+            )
+
+        content = response.choices[0].message.content
+        data = json.loads(content)
+        validated_data = ProductRecommendationList(**data)
+        
+        return validated_data.recommendations[:10]
+        
+    except Exception as e:
+        print(f"Erro ao recomendar produtos com IA: {e}")
+        return []
+"""
